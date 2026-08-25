@@ -4434,24 +4434,30 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             notInArray(issues.status, ["done", "cancelled"]),
           ),
         ),
-      issueRowsPromise.then((rows) => {
-        const issueIdsUnderAnalysis = rows.map((row) => row.id);
-        return issueIdsUnderAnalysis.length === 0
-          ? []
-          : db
-            .select({
-              companyId: issueRecoveryActions.companyId,
-              issueId: issueRecoveryActions.sourceIssueId,
-              status: issueRecoveryActions.status,
-            })
-            .from(issueRecoveryActions)
-            .where(
-              and(
-                inArray(issueRecoveryActions.status, ["active", "escalated"]),
-                inArray(issueRecoveryActions.sourceIssueId, issueIdsUnderAnalysis),
-              ),
-            );
-      }),
+      // Correlate active/escalated recovery actions against the same visible-issue scope as
+      // issueRowsPromise above via a JOIN, rather than materializing every id from that
+      // (company-wide, status-unfiltered) result into an IN(...) list. That id list grows with
+      // total issue count (tens of thousands here) and blew past Postgres's practical bind-param
+      // ceiling, failing every heartbeat tick with a DrizzleQueryError (found 2026-08-24). The
+      // status filter alone already bounds this to a handful of rows.
+      db
+        .select({
+          companyId: issueRecoveryActions.companyId,
+          issueId: issueRecoveryActions.sourceIssueId,
+          status: issueRecoveryActions.status,
+        })
+        .from(issueRecoveryActions)
+        .innerJoin(issues, and(
+          eq(issues.id, issueRecoveryActions.sourceIssueId),
+          eq(issues.companyId, issueRecoveryActions.companyId),
+        ))
+        .where(
+          and(
+            inArray(issueRecoveryActions.status, ["active", "escalated"]),
+            visibleIssueCondition(),
+            notInArray(issues.originKind, [RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation]),
+          ),
+        ),
     ]);
 
     const openRecoveryIssues = recoveryIssueRows.flatMap((row) => {

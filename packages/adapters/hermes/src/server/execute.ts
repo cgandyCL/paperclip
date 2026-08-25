@@ -496,6 +496,50 @@ export async function execute(
     // Non-fatal
   }
 
+  // Blast-radius refuse (HITL 2026-08-21): COM must not spawn in police-rms;
+  // POL must not spawn in COM packages. Not an accredited enclave.
+  // Toolsets refuse: COM/POL agents must not have file or code_execution toolsets,
+  // which bypass terminal-level approvals.deny (write_file/patch go through
+  // _check_sensitive_path which does not block packages/). Only terminal,web may pass.
+  {
+    const companyId = ctx.agent?.companyId || "";
+    const cwdNorm = path.resolve(cwd);
+    const COM = "ef13ac96-a934-446a-92d4-ee1b7785a314";
+    const POL = "7bedfd91-aa99-4668-a288-d195754597dc";
+    let refuse: string | null = null;
+
+    // Enclave cwd boundary check
+    if (companyId === COM && cwdNorm.includes(`${path.sep}police-rms`)) {
+      refuse = `COM enclave: cwd ${cwdNorm} is under police-rms`;
+    } else if (
+      companyId === POL &&
+      cwdNorm.includes(`${path.sep}companies${path.sep}compliance-labs`)
+    ) {
+      refuse = `POL enclave: cwd ${cwdNorm} is under compliance-labs`;
+    }
+
+    // Toolsets refuse: COM/POL must only pass terminal,web — no file/code_execution
+    if (!refuse && (companyId === COM || companyId === POL) && toolsets) {
+      const forbidden = ["file", "code_execution"];
+      const present = toolsets.split(",").map(t => t.trim().toLowerCase());
+      const found = forbidden.filter(f => present.includes(f));
+      if (found.length > 0) {
+        refuse = `HITL toolsets refuse: company ${companyId.slice(0, 8)} uses toolset(s) ${found.join(",")} which bypass approvals.deny. Allowed: terminal,web only.`;
+      }
+    }
+
+    if (refuse) {
+      await ctx.onLog("stdout", `[hermes] REFUSED spawn: ${refuse}\n`);
+      return {
+        exitCode: 78,
+        signal: null,
+        timedOut: false,
+        errorMessage: refuse,
+        summary: refuse,
+      };
+    }
+  }
+
   // ── Log start ──────────────────────────────────────────────────────────
   await ctx.onLog(
     "stdout",

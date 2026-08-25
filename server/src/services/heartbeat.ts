@@ -13110,16 +13110,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const issueId = readNonEmptyString(runContext.issueId);
       return issueId ? [issueId] : [];
     }))];
-    const monitorIssues = monitorIssueIds.length > 0
-      ? await db
+    // monitorIssueIds is one bind parameter per id in the IN clause below; a
+    // large backlog of stuck "running" runs can push this past Postgres's
+    // 65535-parameter-per-statement limit (seen in production as
+    // MAX_PARAMETERS_EXCEEDED, looping every heartbeat tick). Batch instead
+    // of relying on the caller-side backlog staying small.
+    const MONITOR_ISSUE_ID_BATCH_SIZE = 1000;
+    const monitorIssues: Array<{ id: string; companyId: string; monitorNextCheckAt: Date | null }> = [];
+    for (let i = 0; i < monitorIssueIds.length; i += MONITOR_ISSUE_ID_BATCH_SIZE) {
+      const batch = monitorIssueIds.slice(i, i + MONITOR_ISSUE_ID_BATCH_SIZE);
+      const rows = await db
         .select({
           id: issues.id,
           companyId: issues.companyId,
           monitorNextCheckAt: issues.monitorNextCheckAt,
         })
         .from(issues)
-        .where(inArray(issues.id, monitorIssueIds))
-      : [];
+        .where(inArray(issues.id, batch));
+      monitorIssues.push(...rows);
+    }
     const monitorNextCheckAtByIssue = new Map(
       monitorIssues.map((issue) => [
         `${issue.companyId}:${issue.id}`,
