@@ -400,8 +400,17 @@ async function getMigrationStatusPayload() {
     process.exit(status.code);
   }
 
+  // pnpm's own "Unsupported engine" WARN lines (printed to the same stdout
+  // stream by every workspace package when the running Node doesn't match
+  // engines.node) land ahead of the actual JSON line here, so a blind
+  // JSON.parse(stdout.trim()) breaks even when the payload itself is valid
+  // (found 2026-08-25 -- crashed on every startup, not just when migrations
+  // were actually pending). The payload is always the last non-empty line.
+  const lines = status.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  const jsonLine = [...lines].reverse().find((line) => line.startsWith("{"));
   try {
-    return JSON.parse(status.stdout.trim()) as { status?: string; pendingMigrations?: string[] };
+    if (!jsonLine) throw new Error("no JSON line found in migration-status output");
+    return JSON.parse(jsonLine) as { status?: string; pendingMigrations?: string[] };
   } catch (error) {
     process.stderr.write(
       status.stderr ||
